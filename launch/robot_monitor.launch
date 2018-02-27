@@ -1,0 +1,4 @@
+<launch>
+<node pkg="robot_monitor" type="robot_monitor_node.py" name="robot_monitor"
+    args="env base $(find laas_models)/urdf/pepper.urdf $(find pepper_meshes)/meshes pepper CameraTop_optical_frame --reference map" output="screen"/>
+</launch>
