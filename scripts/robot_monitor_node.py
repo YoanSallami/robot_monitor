@@ -12,12 +12,13 @@ from collections import deque
 import numpy
 import yaml
 import underworlds
-from underworlds.types import Entity, Mesh, Camera, MESH
+from std_msgs.msg import String
+from underworlds.types import Entity, Mesh, Camera, MESH, Situation
 from underworlds.helpers import transformations
 from underworlds.tools.loader import ModelLoader
 from underworlds.tools.primitives_3d import Box
 
-EPSILON = 0.01
+EPSILON = 0.02
 TF_CACHE_TIME = 5.0
 DEFAULT_CLIP_PLANE_NEAR = 0.001
 DEFAULT_CLIP_PLANE_FAR = 1000.0
@@ -60,7 +61,7 @@ class RobotMonitor(object):
         self.tfBuffer = tf2_ros.Buffer(rospy.Duration(TF_CACHE_TIME), debug=False)
         self.listener = tf2_ros.TransformListener(self.tfBuffer)
 
-        self.node_mapping = {}
+        self.node_mapping = {self.source.scene.rootnode.id: self.target.scene.rootnode.id}
 
         self.already_created_node_ids = {}
         self.time_table = {}
@@ -68,14 +69,22 @@ class RobotMonitor(object):
         self.urdf_file_path = urdf_file_path
         self.model_dir_path = model_dir_path
 
+        self.situation_map = {}
+
         self.robot_name = robot_name
         rospy.set_param('robot_name', robot_name)
+
         self.perspective_frame = perspective_frame
         self.reference_frame = reference_frame
         self.cam_rot = cam_rot
         # The map of the parent frames ordered by frame name
         self.parent_frames_map = {}
         self.model_map = {}
+
+        self.relations_map = {}
+        self.ros_pub = {"situation_log": rospy.Publisher("robot_monitor/log", String, queue_size=5)}
+        self.previous_nodes_to_update = []
+
         self.aabb_map = {}
         self.frames_transform = {}
 
@@ -122,8 +131,7 @@ class RobotMonitor(object):
                                 self.model_map[link.get("name")] = n.properties["mesh_ids"]
                                 self.aabb_map[link.get("name")] = n.properties["aabb"]
                     except Exception as e:
-                        rospy.logwarn("[urdf_reader] Error while loading model \"" + str(path[len(path) - 1]) + "\" : "
-                                      + str(e))
+                        pass
                 else:
                     if link.find("visual").find("geometry").find("box") is not None:
                         mesh_ids = []
@@ -133,7 +141,52 @@ class RobotMonitor(object):
                         mesh_ids.append([box.id])
                         self.model_map[link.get("name")] = mesh_ids
 
+    def start_moving_situation(self, subject_name):
+        description = "moving("+subject_name+")"
+        sit = Situation(desc=description)
+        self.relations_map[description] = sit.id
+        self.ros_pub["situation_log"].publish("START "+description)
+        try:
+            self.target.timeline.update(sit)
+        except Exception as e:
+            rospy.logwarn("[robot_monitor] Exception occurred : " + str(e))
+        return sit.id
+
+    def end_moving_situation(self, subject_name):
+        description = "moving("+subject_name+")"
+        sit_id = self.relations_map[description]
+        self.ros_pub["situation_log"].publish("END "+description)
+        try:
+            self.target.timeline.end(self.target.timeline[sit_id])
+        except Exception as e:
+            rospy.logwarn("[robot_monitor] Exception occurred : "+str(e))
+
     def filter(self):
+        nodes_to_update = []
+        for node in self.source.scene.nodes:
+            if node != self.source.scene.rootnode:
+                new_node = node.copy()
+                if node.id in self.node_mapping:
+                    new_node.id = self.node_mapping[node.id]
+                    if new_node in self.target.scene.nodes:
+                        if not numpy.allclose(self.target.scene.nodes[new_node.id].transformation, node.transformation,
+                                              rtol=0, atol=EPSILON):
+                            nodes_to_update.append(node)
+                else:
+                    self.node_mapping[node.id] = new_node.id
+                    self.frames_transform[new_node.name] = new_node.transformation
+                    nodes_to_update.append(new_node)
+
+        if nodes_to_update:
+            for node in nodes_to_update:
+                if node.parent == self.source.scene.rootnode.id:
+                    self.target.scene.nodes.update(node)
+                node.parent = self.node_mapping[node.parent] if node.parent in self.node_mapping \
+                    else self.target.scene.rootnode.id
+            self.target.scene.nodes.update(nodes_to_update)
+
+
+    def monitor_robot(self):
         """
         This method read the frames of the robot if they exist in /tf and then update the poses/3D models of
         the robot in the output world
@@ -160,6 +213,7 @@ class RobotMonitor(object):
                 if not numpy.allclose(self.frames_transform[node.name], node.transformation, rtol=0, atol=EPSILON):
                     self.frames_transform[node.name] = node.transformation
                     nodes_to_update.append(node)
+
             else:
                 self.already_created_node_ids[node.name] = node.id
                 self.frames_transform[node.name] = node.transformation
@@ -191,29 +245,36 @@ class RobotMonitor(object):
             for node in self.source.scene.nodes:
                 if node != self.source.scene.rootnode:
                     new_node = node.copy()
-                    new_node.parent = self.node_mapping[new_node.parent] if new_node.parent in self.node_mapping \
-                        else self.target.scene.rootnode.id
                     if node.id in self.node_mapping:
                         new_node.id = self.node_mapping[node.id]
-                        if not numpy.allclose(self.frames_transform[node.name], node.transformation,
+                        if new_node in self.target.scene.nodes:
+                            if not numpy.allclose(self.target.scene.nodes[new_node.id].transformation, node.transformation,
                                               rtol=0, atol=EPSILON):
-                            self.frames_transform[new_node.name] = new_node.transformation
-                            nodes_to_update.append(node)
+                                nodes_to_update.append(node)
                     else:
                         self.node_mapping[node.id] = new_node.id
                         self.frames_transform[new_node.name] = new_node.transformation
                         nodes_to_update.append(new_node)
 
+            if not self.previous_nodes_to_update:
+                if nodes_to_update:
+                    self.start_moving_situation(self.robot_name)
+            else:
+                if not nodes_to_update:
+                    self.end_moving_situation(self.robot_name)
+
             if nodes_to_update:
                 self.target.scene.nodes.update(nodes_to_update)
+            self.previous_nodes_to_update = nodes_to_update
 
-
-        except Exception :
+        except (tf2_ros.TransformException, tf2_ros.LookupException, tf2_ros.ConnectivityException,
+                tf2_ros.ExtrapolationException):
             pass
 
     def run(self):
         while not rospy.is_shutdown():
             self.filter()
+            self.monitor_robot()
 
 if __name__ == "__main__":
 
