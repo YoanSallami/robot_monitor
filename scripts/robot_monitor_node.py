@@ -62,6 +62,7 @@ class RobotMonitor(object):
         self.listener = tf2_ros.TransformListener(self.tfBuffer)
 
         self.node_mapping = {self.source.scene.rootnode.id: self.target.scene.rootnode.id}
+        self.situation_mapping = {}
 
         self.already_created_node_ids = {}
         self.time_table = {}
@@ -87,6 +88,8 @@ class RobotMonitor(object):
 
         self.aabb_map = {}
         self.frames_transform = {}
+
+        self.current_situations_map = {}
 
         self.parent_frames_map[reference_frame] = "root"
         self.parent_frames_map["base_footprint"] = reference_frame
@@ -141,23 +144,39 @@ class RobotMonitor(object):
                         mesh_ids.append([box.id])
                         self.model_map[link.get("name")] = mesh_ids
 
-    def start_moving_situation(self, subject_name):
-        description = "moving("+subject_name+")"
+    def start_n2_situation(self, predicate, subject_name, object_name):
+        description = predicate+"("+subject_name+","+object_name+")"
         sit = Situation(desc=description)
-        self.relations_map[description] = sit.id
-        self.ros_pub["situation_log"].publish("START "+description)
-        try:
-            self.target.timeline.update(sit)
-        except Exception as e:
-            rospy.logwarn("[robot_monitor] Exception occurred : " + str(e))
+        sit.starttime = time.time()
+        self.current_situations_map[description] = sit
+        self.ros_pub["situation_log"].publish("START " + description)
+        self.target.timeline.update(sit)
         return sit.id
 
-    def end_moving_situation(self, subject_name):
-        description = "moving("+subject_name+")"
-        sit_id = self.relations_map[description]
+    def start_n1_situation(self, predicate, subject_name):
+        description = predicate+"("+subject_name+")"
+        sit = Situation(desc=description)
+        sit.starttime = time.time()
+        self.current_situations_map[description] = sit
+        self.ros_pub["situation_log"].publish("START " + description)
+        self.target.timeline.update(sit)
+        return sit.id
+
+    def end_n1_situation(self, predicate, subject_name):
+        description = predicate+"("+subject_name+")"
+        sit = self.current_situations_map[description]
         self.ros_pub["situation_log"].publish("END "+description)
         try:
-            self.target.timeline.end(self.target.timeline[sit_id])
+            self.target.timeline.end(sit)
+        except Exception as e:
+            rospy.logwarn("[robot_monitor] Exception occurred : "+str(e))
+
+    def end_n2_situation(self, predicate, subject_name, object_name):
+        description = predicate+"("+subject_name+","+object_name+")"
+        sit = self.current_situations_map[description]
+        self.ros_pub["situation_log"].publish("END "+description)
+        try:
+            self.target.timeline.end(sit)
         except Exception as e:
             rospy.logwarn("[robot_monitor] Exception occurred : "+str(e))
 
@@ -184,6 +203,11 @@ class RobotMonitor(object):
                 node.parent = self.node_mapping[node.parent] if node.parent in self.node_mapping \
                     else self.target.scene.rootnode.id
             self.target.scene.nodes.update(nodes_to_update)
+
+        for situation in self.source.timeline:
+            new_situation = situation.copy()
+            if situation in self.situation_mapping:
+                new_situation.id = self.situation_mapping[situation.id]
 
 
     def monitor_robot(self):
@@ -255,13 +279,6 @@ class RobotMonitor(object):
                         self.node_mapping[node.id] = new_node.id
                         self.frames_transform[new_node.name] = new_node.transformation
                         nodes_to_update.append(new_node)
-
-            if not self.previous_nodes_to_update:
-                if nodes_to_update:
-                    self.start_moving_situation(self.robot_name)
-            else:
-                if not nodes_to_update:
-                    self.end_moving_situation(self.robot_name)
 
             if nodes_to_update:
                 self.target.scene.nodes.update(nodes_to_update)
