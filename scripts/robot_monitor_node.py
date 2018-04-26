@@ -22,14 +22,13 @@ EPSILON = 0.02
 TF_CACHE_TIME = 5.0
 DEFAULT_CLIP_PLANE_NEAR = 0.001
 DEFAULT_CLIP_PLANE_FAR = 1000.0
-DEFAULT_HORIZONTAL_FOV = 50.0
-DEFAULT_ASPECT = 1.33333
+DEFAULT_HORIZONTAL_FOV = 57.20
+DEFAULT_ASPECT = 1.291196388
 
 
 # just for convenience
 def strip_leading_slash(s):
     return s[1:] if s.startswith("/") else s
-
 
 # just for convenience
 def transformation_matrix(t, q):
@@ -204,11 +203,17 @@ class RobotMonitor(object):
                     else self.target.scene.rootnode.id
             self.target.scene.nodes.update(nodes_to_update)
 
+        situations_to_update = []
         for situation in self.source.timeline:
             new_situation = situation.copy()
             if situation in self.situation_mapping:
                 new_situation.id = self.situation_mapping[situation.id]
+            else:
+                self.situation_mapping[situation.id] = new_situation.id
+                situations_to_update.append(new_situation)
 
+        if situations_to_update:
+            self.target.timeline.update(situations_to_update)
 
     def monitor_robot(self):
         """
